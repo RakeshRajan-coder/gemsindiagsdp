@@ -1,0 +1,26 @@
+{
+  "name": "tradecenter-marketplace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Precious metals and gemstone merchant marketplace",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --watch --env-file-if-exists=.env server.js",
+    "seed:stores": "node --env-file-if-exists=.env seed-stores.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^12.2.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "supertest": "^7.1.4"
+  }
+}
