@@ -11,7 +11,7 @@ npm install
 cp .env.example .env
 ```
 
-Set `JWT_SECRET`, `RATE_UPDATE_TOKEN`, and `ADMIN_API_TOKEN` in `.env` to independent random secrets before starting. Add a GoldAPI.io key to `GOLDAPI_API_KEY` to enable live metal quotes. Start the server with `npm start`, then open `http://localhost:3000`. SQLite data is stored in `data/tradecenter.sqlite` by default. Run API tests with `npm test`.
+Set `JWT_SECRET` and `RATE_UPDATE_TOKEN` in `.env` to independent random secrets before starting. Admin login uses `ADMIN_USERNAME` and a bcrypt `ADMIN_PASSWORD_HASH`; the local ignored `.env` is configured with the requested default account. Change that password before exposing the app beyond a trusted development environment. Add a GoldAPI.io key to `GOLDAPI_API_KEY` to enable live metal quotes. Start the server with `npm start`, then open `http://localhost:3000`. SQLite data is stored in `data/tradecenter.sqlite` by default. Run API tests with `npm test`.
 
 ## API
 
@@ -37,4 +37,4 @@ npm run seed:stores
 
 This inserts 100,000 labeled demo stores in batches of 2,000. To seed a smaller batch for testing, pass a count and batch size, for example `npm run seed:stores -- 1000 250`. The command appends records; rerunning it adds more demo stores. It never runs automatically at server startup. Demo rows have clearly fake shop and owner names, a sample location, and one or more commodity tags.
 
-Open `/admin` on the running app and enter `ADMIN_API_TOKEN`. Store search uses SQLite FTS5; status, demo-record, and commodity filters use indexes, with cursor pagination capped at 100 rows per request. Admin APIs are under `/api/admin/stores` and require `Authorization: Bearer $ADMIN_API_TOKEN`. Add real stores as pending, approve or reject them after review, replace a demo row with real details (replacement remains pending), or delete demo rows. Real merchant records cannot be deleted through the demo cleanup action.
+Sign in at `/admin` with `ADMIN_USERNAME` and the configured password. The dashboard uses an HttpOnly, SameSite=Strict, eight-hour session cookie; admin APIs also accept `Authorization: Bearer $ADMIN_API_TOKEN` for automation when configured. Store search uses SQLite FTS5; status, demo-record, and commodity filters use indexes, with cursor pagination capped at 100 rows per request. Add real stores as pending, approve or reject them after review, replace a demo row with real details (replacement remains pending), or delete demo rows. Real merchant records cannot be deleted through the demo cleanup action.

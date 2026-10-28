@@ -1,5 +1,6 @@
 const { after, before, test } = require("node:test");
 const assert = require("node:assert/strict");
+const bcrypt = require("bcryptjs");
 const request = require("supertest");
 const { createApp, createDatabase, migrateRatesToInr } = require("../server");
 
@@ -7,6 +8,7 @@ const providerRequests = [];
 const app = createApp({
   dbPath: ":memory:", jwtSecret: "test-secret-with-more-than-thirty-two-bytes",
   rateUpdateToken: "test-rate-update-token", adminApiToken: "test-admin-token",
+  adminUsername: "test-admin", adminPasswordHash: bcrypt.hashSync("a-secure-test-passphrase", 4),
   goldApiKey: "goldapi-test-key", goldApiBaseUrl: "https://gold.example/api",
   fxDataUrl: "https://fx.example/latest/USD", diamondGuidePriceInr: 100000,
   fetch: async (url, options) => {
@@ -22,6 +24,28 @@ const server = app.listen(0);
 const client = request(server);
 
 after(() => new Promise((resolve) => server.close(() => { app.locals.shutdown(); resolve(); })));
+
+test("admin login uses a secure session cookie and protects store operations", async () => {
+  const invalid = await client.post("/api/admin/login").send({ username: "test-admin", password: "wrong-password" });
+  assert.equal(invalid.status, 401);
+
+  const login = await client.post("/api/admin/login").send({ username: "test-admin", password: "a-secure-test-passphrase" });
+  assert.equal(login.status, 200);
+  assert.match(login.headers["set-cookie"][0], /HttpOnly/);
+  assert.match(login.headers["set-cookie"][0], /SameSite=Strict/);
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+
+  const session = await client.get("/api/admin/session").set("Cookie", cookie);
+  assert.equal(session.status, 200);
+  const stats = await client.get("/api/admin/stores/stats").set("Cookie", cookie);
+  assert.equal(stats.status, 200);
+
+  const logout = await client.post("/api/admin/logout").set("Cookie", cookie);
+  assert.equal(logout.status, 204);
+  assert.match(logout.headers["set-cookie"][0], /Max-Age=0/);
+  const expiredSession = await client.get("/api/admin/session").set("Cookie", cookie);
+  assert.equal(expiredSession.status, 401);
+});
 
 test("registers a merchant, creates a secure session, and allows logout", async () => {
   const registration = await client.post("/api/auth/register").send({

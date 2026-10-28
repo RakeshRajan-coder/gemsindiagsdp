@@ -9,6 +9,7 @@ const helmet = require("helmet");
 const jwt = require("jsonwebtoken");
 
 const SESSION_COOKIE = "tradecenter_session";
+const ADMIN_SESSION_COOKIE = "tradecenter_admin_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 8;
 const USD_INR_DEFAULT = 83.5;
 const RATE_DEFAULTS = [
@@ -58,6 +59,11 @@ function createDatabase(dbPath = process.env.DB_PATH || path.join(__dirname, "da
       source TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+      id TEXT PRIMARY KEY,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at ON admin_sessions(expires_at);
     CREATE TABLE IF NOT EXISTS merchant_stores (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       shop_name TEXT NOT NULL,
@@ -241,12 +247,24 @@ function clearSessionCookie(response) {
   response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
 }
 
+function setAdminSessionCookie(response, token) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  response.setHeader("Set-Cookie", `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_SECONDS}${secure}`);
+}
+
+function clearAdminSessionCookie(response) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  response.setHeader("Set-Cookie", `${ADMIN_SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
+}
+
 function createApp(options = {}) {
   const db = options.db || createDatabase(options.dbPath);
   const ownsDatabase = !options.db;
   const jwtSecret = options.jwtSecret || process.env.JWT_SECRET || crypto.randomBytes(32).toString("hex");
   const rateUpdateToken = options.rateUpdateToken ?? process.env.RATE_UPDATE_TOKEN ?? "";
   const adminApiToken = options.adminApiToken ?? process.env.ADMIN_API_TOKEN ?? "";
+  const adminUsername = options.adminUsername ?? process.env.ADMIN_USERNAME ?? "";
+  const adminPasswordHash = options.adminPasswordHash ?? process.env.ADMIN_PASSWORD_HASH ?? "";
   const goldApiBaseUrl = options.goldApiBaseUrl ?? process.env.GOLDAPI_BASE_URL ?? "https://www.goldapi.io/api";
   const goldApiKey = options.goldApiKey ?? process.env.GOLDAPI_API_KEY ?? "";
   const fxDataUrl = options.fxDataUrl ?? process.env.FX_DATA_URL ?? "https://open.er-api.com/v6/latest/USD";
@@ -273,6 +291,7 @@ function createApp(options = {}) {
   app.get("/admin", (_request, response) => response.sendFile(path.join(__dirname, "admin.html")));
 
   const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: "draft-8", legacyHeaders: false });
+  const adminLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: "draft-8", legacyHeaders: false });
   const getMerchant = (id) => db.prepare("SELECT id, name, company, email, created_at AS createdAt FROM merchants WHERE id = ?").get(id);
   const requireMerchant = (request, response, next) => {
     try {
@@ -288,14 +307,56 @@ function createApp(options = {}) {
     }
   };
   const requireAdmin = (request, response, next) => {
-    if (!adminApiToken) return response.status(503).json({ error: "Admin access is not configured" });
     const supplied = Buffer.from(request.get("authorization")?.replace(/^Bearer\s+/i, "") || "");
     const expected = Buffer.from(adminApiToken);
-    if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+    if (adminApiToken && supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected)) return next();
+    try {
+      const session = readCookie(request, ADMIN_SESSION_COOKIE);
+      if (!session) return response.status(401).json({ error: "Admin authentication required" });
+      const payload = jwt.verify(session, jwtSecret, { issuer: "tradecenter", audience: "tradecenter-admin" });
+      if (payload.role !== "admin" || payload.sub !== adminUsername) return response.status(401).json({ error: "Admin authentication required" });
+      const activeSession = db.prepare("SELECT 1 FROM admin_sessions WHERE id = ? AND expires_at > ?")
+        .get(payload.jti, Math.floor(Date.now() / 1000));
+      if (!activeSession) return response.status(401).json({ error: "Admin authentication required" });
+      return next();
+    } catch {
       return response.status(401).json({ error: "Admin authentication required" });
     }
-    return next();
   };
+
+  app.post("/api/admin/login", adminLoginLimiter, async (request, response) => {
+    if (!adminUsername || !adminPasswordHash) return response.status(503).json({ error: "Admin login is not configured" });
+    const username = typeof request.body?.username === "string" ? request.body.username : "";
+    const password = typeof request.body?.password === "string" ? request.body.password : "";
+    let passwordMatches = false;
+    try { passwordMatches = await bcrypt.compare(password, adminPasswordHash); } catch { passwordMatches = false; }
+    const usernameBytes = Buffer.from(username);
+    const expectedUsernameBytes = Buffer.from(adminUsername);
+    const usernameMatches = usernameBytes.length === expectedUsernameBytes.length && crypto.timingSafeEqual(usernameBytes, expectedUsernameBytes);
+    if (!usernameMatches || !passwordMatches) return response.status(401).json({ error: "Username or password is incorrect" });
+    const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+    const sessionId = crypto.randomUUID();
+    db.prepare("DELETE FROM admin_sessions WHERE expires_at <= ?").run(Math.floor(Date.now() / 1000));
+    db.prepare("INSERT INTO admin_sessions (id, expires_at) VALUES (?, ?)").run(sessionId, expiresAt);
+    const token = jwt.sign({ role: "admin" }, jwtSecret, {
+      subject: adminUsername, jwtid: sessionId, issuer: "tradecenter", audience: "tradecenter-admin", expiresIn: SESSION_TTL_SECONDS
+    });
+    setAdminSessionCookie(response, token);
+    return response.json({ username: adminUsername });
+  });
+
+  app.get("/api/admin/session", requireAdmin, (_request, response) => response.json({ authenticated: true }));
+  app.post("/api/admin/logout", (request, response) => {
+    try {
+      const token = readCookie(request, ADMIN_SESSION_COOKIE);
+      if (token) {
+        const payload = jwt.verify(token, jwtSecret, { issuer: "tradecenter", audience: "tradecenter-admin" });
+        if (payload.role === "admin" && payload.jti) db.prepare("DELETE FROM admin_sessions WHERE id = ?").run(payload.jti);
+      }
+    } catch { /* Expired and malformed sessions are removed by clearing the cookie. */ }
+    clearAdminSessionCookie(response);
+    return response.status(204).end();
+  });
 
   const getStore = db.prepare(`SELECT id, shop_name AS shopName, location_city AS city,
     location_country AS country, owner_name AS owner, available_metals AS availableMetals,
@@ -607,8 +668,11 @@ async function start() {
   if (process.env.NODE_ENV === "production" && (!process.env.JWT_SECRET || Buffer.byteLength(process.env.JWT_SECRET) < 32)) {
     throw new Error("Set JWT_SECRET to at least 32 bytes in production");
   }
-  if (process.env.NODE_ENV === "production" && (!process.env.ADMIN_API_TOKEN || Buffer.byteLength(process.env.ADMIN_API_TOKEN) < 32)) {
-    throw new Error("Set ADMIN_API_TOKEN to at least 32 bytes in production");
+  if (process.env.NODE_ENV === "production" && (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD_HASH)) {
+    throw new Error("Set ADMIN_USERNAME and a bcrypt ADMIN_PASSWORD_HASH in production");
+  }
+  if (process.env.NODE_ENV === "production" && process.env.ADMIN_API_TOKEN && Buffer.byteLength(process.env.ADMIN_API_TOKEN) < 32) {
+    throw new Error("If set, ADMIN_API_TOKEN must be at least 32 bytes in production");
   }
   if (process.env.NODE_ENV === "production" && (!process.env.RATE_UPDATE_TOKEN || Buffer.byteLength(process.env.RATE_UPDATE_TOKEN) < 32)) {
     throw new Error("Set RATE_UPDATE_TOKEN to at least 32 bytes in production");
